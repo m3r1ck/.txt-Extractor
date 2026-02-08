@@ -19,17 +19,22 @@ from bs4 import BeautifulSoup
 
 
 def pdf_to_text(pdf_path: Path) -> str:
-    """Extract text from a PDF file with improved layout analysis."""
+    """Extract text from a PDF file, skipping tables."""
+    import re
+
     md_text = pymupdf4llm.to_markdown(str(pdf_path))
-    # Strip Markdown formatting to produce clean plain text
-    lines = []
+
+    # Remove Markdown tables (lines starting with |, and separator lines like |---|)
+    filtered = []
     for line in md_text.splitlines():
+        if re.match(r"\s*\|", line):
+            continue
         # Remove heading markers
         stripped = line.lstrip("#").strip() if line.startswith("#") else line
         # Remove bold/italic markers
         stripped = stripped.replace("**", "").replace("__", "")
-        lines.append(stripped)
-    return "\n".join(lines).strip()
+        filtered.append(stripped)
+    return "\n".join(filtered).strip()
 
 
 def html_to_text(html_path: Path) -> str:
@@ -52,15 +57,9 @@ def html_to_text(html_path: Path) -> str:
     for br in soup.find_all("br"):
         br.replace_with("\n")
 
-    # Process tables in-place: replace each <table> with its text rendition
+    # Remove all tables
     for table_tag in soup.find_all("table"):
-        rows = []
-        for tr in table_tag.find_all("tr"):
-            cells = [td.get_text(separator=" ", strip=True)
-                     for td in tr.find_all(["td", "th"])]
-            rows.append(cells)
-        formatted = _format_table(rows)
-        table_tag.replace_with(f"\n{formatted}\n" if formatted else "")
+        table_tag.decompose()
 
     text = soup.get_text(separator="\n")
 
@@ -79,38 +78,6 @@ def html_to_text(html_path: Path) -> str:
             cleaned.append(stripped)
 
     return "\n".join(cleaned).strip()
-
-
-def _format_table(rows: list[list[str | None]]) -> str:
-    """Format a list of rows into an aligned plain-text table."""
-    if not rows:
-        return ""
-
-    # Normalise: replace None with empty string
-    rows = [[cell or "" for cell in row] for row in rows]
-
-    # Determine column widths
-    max_cols = max(len(row) for row in rows)
-    col_widths = [0] * max_cols
-    for row in rows:
-        for i, cell in enumerate(row):
-            col_widths[i] = max(col_widths[i], len(str(cell)))
-
-    # Build formatted lines
-    lines = []
-    for row_idx, row in enumerate(rows):
-        padded = []
-        for i in range(max_cols):
-            val = str(row[i]) if i < len(row) else ""
-            padded.append(val.ljust(col_widths[i]))
-        lines.append("  ".join(padded).rstrip())
-
-        # Add a separator after the header row
-        if row_idx == 0:
-            sep = "  ".join("-" * w for w in col_widths)
-            lines.append(sep)
-
-    return "\n".join(lines)
 
 
 def convert_file(input_path: Path, output_dir: Path | None = None) -> Path:

@@ -14,37 +14,22 @@ import argparse
 import sys
 from pathlib import Path
 
-import pymupdf
+import pymupdf4llm
 from bs4 import BeautifulSoup
 
 
 def pdf_to_text(pdf_path: Path) -> str:
-    """Extract text from a PDF file, including tables."""
-    parts = []
-    doc = pymupdf.open(pdf_path)
-    for page in doc:
-        # Try to find tables on this page
-        tables = page.find_tables()
-
-        if tables.tables:
-            # Get the full page text (includes table text inline)
-            text = page.get_text().strip()
-            if text:
-                parts.append(text)
-
-            # Append each table formatted as aligned columns
-            for table in tables:
-                rows = table.extract()
-                formatted = _format_table(rows)
-                if formatted:
-                    parts.append(formatted)
-        else:
-            text = page.get_text().strip()
-            if text:
-                parts.append(text)
-
-    doc.close()
-    return "\n\n".join(parts)
+    """Extract text from a PDF file with improved layout analysis."""
+    md_text = pymupdf4llm.to_markdown(str(pdf_path))
+    # Strip Markdown formatting to produce clean plain text
+    lines = []
+    for line in md_text.splitlines():
+        # Remove heading markers
+        stripped = line.lstrip("#").strip() if line.startswith("#") else line
+        # Remove bold/italic markers
+        stripped = stripped.replace("**", "").replace("__", "")
+        lines.append(stripped)
+    return "\n".join(lines).strip()
 
 
 def html_to_text(html_path: Path) -> str:

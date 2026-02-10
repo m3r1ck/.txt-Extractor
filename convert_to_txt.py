@@ -14,27 +14,55 @@ import argparse
 import sys
 from pathlib import Path
 
+import pymupdf
 import pymupdf4llm
+import pytesseract
 from bs4 import BeautifulSoup
+from PIL import Image
+
+# Minimum characters per page to consider embedded text sufficient
+_MIN_TEXT_THRESHOLD = 50
 
 
 def pdf_to_text(pdf_path: Path) -> str:
-    """Extract text from a PDF file, skipping tables."""
+    """Extract text from a PDF file, skipping tables.
+
+    Uses embedded text when available, falls back to OCR for scanned
+    pages. Handles both portrait and landscape orientations.
+    """
+    import io
     import re
 
+    # First try embedded text extraction via pymupdf4llm
     md_text = pymupdf4llm.to_markdown(str(pdf_path))
 
-    # Remove Markdown tables (lines starting with |, and separator lines like |---|)
-    filtered = []
-    for line in md_text.splitlines():
-        if re.match(r"\s*\|", line):
-            continue
-        # Remove heading markers
-        stripped = line.lstrip("#").strip() if line.startswith("#") else line
-        # Remove bold/italic markers
-        stripped = stripped.replace("**", "").replace("__", "")
-        filtered.append(stripped)
-    return "\n".join(filtered).strip()
+    # Check if there's meaningful embedded text
+    stripped_total = re.sub(r"\s+", "", md_text)
+    if len(stripped_total) >= _MIN_TEXT_THRESHOLD:
+        # Embedded text found — filter out tables and clean up
+        filtered = []
+        for line in md_text.splitlines():
+            if re.match(r"\s*\|", line):
+                continue
+            cleaned = line.lstrip("#").strip() if line.startswith("#") else line
+            cleaned = cleaned.replace("**", "").replace("__", "")
+            filtered.append(cleaned)
+        return "\n".join(filtered).strip()
+
+    # Fallback: OCR page by page (scanned PDF)
+    doc = pymupdf.open(pdf_path)
+    parts = []
+    for page in doc:
+        # Render at 300 DPI for good OCR quality; pymupdf auto-handles rotation
+        zoom = 300 / 72
+        mat = pymupdf.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        text = pytesseract.image_to_string(img)
+        if text.strip():
+            parts.append(text.strip())
+    doc.close()
+    return "\n\n".join(parts)
 
 
 def html_to_text(html_path: Path) -> str:

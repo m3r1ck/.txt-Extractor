@@ -25,44 +25,105 @@ _MIN_TEXT_THRESHOLD = 50
 
 
 def pdf_to_text(pdf_path: Path) -> str:
-    """Extract text from a PDF file, skipping tables.
+    """Extract text from a PDF file.
 
-    Uses embedded text when available, falls back to OCR for scanned
-    pages. Handles both portrait and landscape orientations.
+    Processes page by page. Uses embedded text when available, falls back
+    to OCR for scanned pages. Detects and corrects page orientation for
+    sideways pages. Skips financial tables but keeps paragraph text.
     """
     import io
     import re
 
-    # First try embedded text extraction via pymupdf4llm
-    md_text = pymupdf4llm.to_markdown(str(pdf_path))
-
-    # Check if there's meaningful embedded text
-    stripped_total = re.sub(r"\s+", "", md_text)
-    if len(stripped_total) >= _MIN_TEXT_THRESHOLD:
-        # Embedded text found — filter out tables and clean up
-        filtered = []
-        for line in md_text.splitlines():
-            if re.match(r"\s*\|", line):
-                continue
-            cleaned = line.lstrip("#").strip() if line.startswith("#") else line
-            cleaned = cleaned.replace("**", "").replace("__", "")
-            filtered.append(cleaned)
-        return "\n".join(filtered).strip()
-
-    # Fallback: OCR page by page (scanned PDF)
     doc = pymupdf.open(pdf_path)
     parts = []
-    for page in doc:
-        # Render at 300 DPI for good OCR quality; pymupdf auto-handles rotation
-        zoom = 300 / 72
-        mat = pymupdf.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat)
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
-        text = pytesseract.image_to_string(img)
-        if text.strip():
-            parts.append(text.strip())
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+
+        # Try embedded text first
+        embedded = page.get_text().strip()
+
+        if len(embedded) >= _MIN_TEXT_THRESHOLD:
+            parts.append(embedded)
+        else:
+            # Scanned page — use OCR with orientation detection
+            zoom = 300 / 72
+            mat = pymupdf.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+
+            # Detect and correct orientation
+            try:
+                osd = pytesseract.image_to_osd(img)
+                angle = int(re.search(r"Rotate: (\d+)", osd).group(1))
+                if angle:
+                    img = img.rotate(-angle, expand=True)
+            except Exception:
+                pass
+
+            text = pytesseract.image_to_string(img, config="--psm 1")
+            if text.strip():
+                parts.append(text.strip())
+
     doc.close()
-    return "\n\n".join(parts)
+
+    # Now filter the combined text: remove financial tables, keep paragraphs
+    return _filter_tables("\n\n".join(parts))
+
+
+def _is_financial_row(line: str) -> bool:
+    """Check if a line looks like a financial table row (short cells, numbers, $)."""
+    import re
+
+    # Count how much of the line is numbers, $, %, commas, parens, dashes, dots
+    numeric_chars = len(re.findall(r"[\d$%,().\-]", line))
+    alpha_chars = len(re.findall(r"[a-zA-Z]", line))
+    if not alpha_chars:
+        return True
+    # If the ratio of numeric to alpha is high, it's likely financial data
+    return numeric_chars > alpha_chars
+
+
+def _filter_tables(text: str) -> str:
+    """Remove financial table content but keep paragraph text."""
+    import re
+
+    lines = text.splitlines()
+    filtered = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # Detect markdown table lines
+        if re.match(r"\s*\|", line):
+            # Gather all consecutive table lines
+            table_lines = []
+            while i < len(lines) and re.match(r"\s*\|", lines[i]):
+                table_lines.append(lines[i])
+                i += 1
+
+            # Extract cell contents (skip separator rows like |---|---|)
+            cells_text = []
+            for tl in table_lines:
+                if re.match(r"\s*\|[\s\-:|]+\|\s*$", tl):
+                    continue
+                cells = [c.strip() for c in tl.split("|") if c.strip()]
+                cells_text.extend(cells)
+
+            # Check if this table has paragraph-length text (>80 chars in a cell)
+            has_paragraph = any(len(cell) > 80 for cell in cells_text)
+            if has_paragraph:
+                # Keep the paragraph text from this table
+                for cell in cells_text:
+                    if len(cell) > 40:
+                        filtered.append(cell)
+            # Otherwise skip the financial table entirely
+            continue
+
+        filtered.append(line)
+        i += 1
+
+    return "\n".join(filtered).strip()
 
 
 def html_to_text(html_path: Path) -> str:
@@ -85,9 +146,17 @@ def html_to_text(html_path: Path) -> str:
     for br in soup.find_all("br"):
         br.replace_with("\n")
 
-    # Remove all tables
+    # Process tables: keep paragraph text, remove financial tables
     for table_tag in soup.find_all("table"):
-        table_tag.decompose()
+        paragraph_texts = []
+        for td in table_tag.find_all(["td", "th"]):
+            cell_text = td.get_text(separator=" ", strip=True)
+            if len(cell_text) > 80:
+                paragraph_texts.append(cell_text)
+        if paragraph_texts:
+            table_tag.replace_with("\n" + "\n\n".join(paragraph_texts) + "\n")
+        else:
+            table_tag.decompose()
 
     text = soup.get_text(separator="\n")
 

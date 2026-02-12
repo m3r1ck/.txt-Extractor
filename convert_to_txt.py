@@ -71,21 +71,52 @@ def pdf_to_text(pdf_path: Path) -> str:
     return _filter_tables("\n\n".join(parts))
 
 
-def _is_financial_row(line: str) -> bool:
-    """Check if a line looks like a financial table row (short cells, numbers, $)."""
+def _is_financial_line(line: str) -> bool:
+    """Check if a line looks like financial data rather than paragraph text."""
     import re
 
-    # Count how much of the line is numbers, $, %, commas, parens, dashes, dots
-    numeric_chars = len(re.findall(r"[\d$%,().\-]", line))
-    alpha_chars = len(re.findall(r"[a-zA-Z]", line))
-    if not alpha_chars:
+    stripped = line.strip()
+    if not stripped:
+        return False
+
+    # Pure dollar amounts, percentages, or numbers
+    if re.match(r"^[\s\d$%,().\-+]+$", stripped):
         return True
-    # If the ratio of numeric to alpha is high, it's likely financial data
-    return numeric_chars > alpha_chars
+
+    # Quarter/year labels like Q2.17, Q3.18, FY2023, etc.
+    if re.match(r"^[QFY\d.\s/\-]+$", stripped, re.IGNORECASE):
+        return True
+
+    # Short lines where numbers/financial chars dominate
+    numeric_chars = len(re.findall(r"[\d$%,().\-]", stripped))
+    alpha_chars = len(re.findall(r"[a-zA-Z]", stripped))
+    total = numeric_chars + alpha_chars
+    if total > 0 and numeric_chars > alpha_chars and len(stripped) < 60:
+        return True
+
+    # Bullet fragments (just a bullet with no real sentence)
+    if stripped in ("▪", "•", "●", "■", "-", "–", "—"):
+        return True
+
+    # Lines that are just short financial labels + numbers
+    # e.g. "Total Segment EBITDA" or "New Reporting Standards ($M)(1)"
+    if len(stripped) < 80 and re.search(r"\(\$[A-Z]*\)", stripped):
+        return True
+
+    # Short financial label lines (common in chart/table headers)
+    financial_keywords = (
+        "revenue", "ebitda", "earnings", "income", "margin", "segment",
+        "operating", "net sales", "gross profit", "cash flow",
+        "financial results", "summary financial", "reporting standards",
+    )
+    if len(stripped) < 80 and any(kw in stripped.lower() for kw in financial_keywords):
+        return True
+
+    return False
 
 
 def _filter_tables(text: str) -> str:
-    """Remove financial table content but keep paragraph text."""
+    """Remove financial table/chart content but keep paragraph text."""
     import re
 
     lines = text.splitlines()
@@ -113,11 +144,18 @@ def _filter_tables(text: str) -> str:
             # Check if this table has paragraph-length text (>80 chars in a cell)
             has_paragraph = any(len(cell) > 80 for cell in cells_text)
             if has_paragraph:
-                # Keep the paragraph text from this table
                 for cell in cells_text:
                     if len(cell) > 40:
                         filtered.append(cell)
-            # Otherwise skip the financial table entirely
+            continue
+
+        # Detect clusters of financial data lines (charts/tables in plain text)
+        if _is_financial_line(line):
+            # Skip consecutive financial lines
+            while i < len(lines) and (
+                _is_financial_line(lines[i]) or not lines[i].strip()
+            ):
+                i += 1
             continue
 
         filtered.append(line)

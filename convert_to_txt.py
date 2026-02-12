@@ -53,7 +53,57 @@ def pdf_to_text(pdf_path: Path) -> str:
             parts.append(text.strip())
 
     doc.close()
-    return "\n\n".join(parts)
+    return _clean_ocr_text("\n\n".join(parts))
+
+
+def _is_junk_line(line: str) -> bool:
+    """Return True if a line is a standalone number, dollar amount, percentage,
+    quarter label, or other non-sentence fragment from a financial table.
+
+    Lines that contain real words in sentences are always kept.
+    """
+    import re
+
+    s = line.strip()
+    if not s:
+        return False
+
+    # Standalone bullet/symbol with no text
+    if s in ("▪", "•", "●", "■", "-", "–", "—", "*", "|"):
+        return True
+
+    # Purely numbers, dollar signs, percentages, commas, parens, dots, dashes
+    # e.g. "$785", "38.5%", "(1,234)", "2,039"
+    if re.match(r"^[\s\d$%€£,().\-+/]+$", s):
+        return True
+
+    # Quarter/year labels: Q2.17, FY2023, Q1 2024, etc.
+    if re.match(r"^[QFY\d.\s/\-]+$", s, re.IGNORECASE):
+        return True
+
+    # Very short line (< 25 chars) that is mostly numbers/symbols, not words
+    # e.g. "38.7%" or "$864" or "Q2.18" but NOT "*High FCF generator"
+    if len(s) < 25:
+        word_chars = len(re.findall(r"[a-zA-Z]", s))
+        if word_chars < 4:
+            return True
+
+    return False
+
+
+def _clean_ocr_text(text: str) -> str:
+    """Remove junk lines (standalone financial data) from OCR output.
+
+    Keeps all lines that look like real sentences or bullet-point notes.
+    Only removes lines that are purely numbers/symbols with no real words.
+    """
+    lines = text.splitlines()
+    cleaned = []
+    for line in lines:
+        if _is_junk_line(line):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
 
 
 def html_to_text(html_path: Path) -> str:

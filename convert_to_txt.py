@@ -15,21 +15,16 @@ import sys
 from pathlib import Path
 
 import pymupdf
-import pymupdf4llm
 import pytesseract
 from bs4 import BeautifulSoup
 from PIL import Image
 
-# Minimum characters per page to consider embedded text sufficient
-_MIN_TEXT_THRESHOLD = 50
-
 
 def pdf_to_text(pdf_path: Path) -> str:
-    """Extract text from a PDF file.
+    """Extract text from a PDF using OCR on every page.
 
-    Processes page by page. Uses embedded text when available, falls back
-    to OCR for scanned pages. Detects and corrects page orientation for
-    sideways pages. Skips financial tables but keeps paragraph text.
+    Renders each page at 300 DPI, detects and corrects orientation,
+    then runs OCR. Works for scanned docs, screenshots, and sideways pages.
     """
     import io
     import re
@@ -37,131 +32,28 @@ def pdf_to_text(pdf_path: Path) -> str:
     doc = pymupdf.open(pdf_path)
     parts = []
 
-    for page_num in range(len(doc)):
-        page = doc[page_num]
+    for page in doc:
+        # Render at 300 DPI for good OCR quality
+        zoom = 300 / 72
+        mat = pymupdf.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
 
-        # Try embedded text first
-        embedded = page.get_text().strip()
+        # Detect and correct orientation for sideways pages
+        try:
+            osd = pytesseract.image_to_osd(img)
+            angle = int(re.search(r"Rotate: (\d+)", osd).group(1))
+            if angle:
+                img = img.rotate(-angle, expand=True)
+        except Exception:
+            pass
 
-        if len(embedded) >= _MIN_TEXT_THRESHOLD:
-            parts.append(embedded)
-        else:
-            # Scanned page — use OCR with orientation detection
-            zoom = 300 / 72
-            mat = pymupdf.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=mat)
-            img = Image.open(io.BytesIO(pix.tobytes("png")))
-
-            # Detect and correct orientation
-            try:
-                osd = pytesseract.image_to_osd(img)
-                angle = int(re.search(r"Rotate: (\d+)", osd).group(1))
-                if angle:
-                    img = img.rotate(-angle, expand=True)
-            except Exception:
-                pass
-
-            text = pytesseract.image_to_string(img, config="--psm 1")
-            if text.strip():
-                parts.append(text.strip())
+        text = pytesseract.image_to_string(img, config="--psm 1")
+        if text.strip():
+            parts.append(text.strip())
 
     doc.close()
-
-    # Now filter the combined text: remove financial tables, keep paragraphs
-    return _filter_tables("\n\n".join(parts))
-
-
-def _is_financial_line(line: str) -> bool:
-    """Check if a line looks like financial data rather than paragraph text."""
-    import re
-
-    stripped = line.strip()
-    if not stripped:
-        return False
-
-    # Pure dollar amounts, percentages, or numbers
-    if re.match(r"^[\s\d$%,().\-+]+$", stripped):
-        return True
-
-    # Quarter/year labels like Q2.17, Q3.18, FY2023, etc.
-    if re.match(r"^[QFY\d.\s/\-]+$", stripped, re.IGNORECASE):
-        return True
-
-    # Short lines where numbers/financial chars dominate
-    numeric_chars = len(re.findall(r"[\d$%,().\-]", stripped))
-    alpha_chars = len(re.findall(r"[a-zA-Z]", stripped))
-    total = numeric_chars + alpha_chars
-    if total > 0 and numeric_chars > alpha_chars and len(stripped) < 60:
-        return True
-
-    # Bullet fragments (just a bullet with no real sentence)
-    if stripped in ("▪", "•", "●", "■", "-", "–", "—"):
-        return True
-
-    # Lines that are just short financial labels + numbers
-    # e.g. "Total Segment EBITDA" or "New Reporting Standards ($M)(1)"
-    if len(stripped) < 80 and re.search(r"\(\$[A-Z]*\)", stripped):
-        return True
-
-    # Short financial label lines (common in chart/table headers)
-    financial_keywords = (
-        "revenue", "ebitda", "earnings", "income", "margin", "segment",
-        "operating", "net sales", "gross profit", "cash flow",
-        "financial results", "summary financial", "reporting standards",
-    )
-    if len(stripped) < 80 and any(kw in stripped.lower() for kw in financial_keywords):
-        return True
-
-    return False
-
-
-def _filter_tables(text: str) -> str:
-    """Remove financial table/chart content but keep paragraph text."""
-    import re
-
-    lines = text.splitlines()
-    filtered = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-
-        # Detect markdown table lines
-        if re.match(r"\s*\|", line):
-            # Gather all consecutive table lines
-            table_lines = []
-            while i < len(lines) and re.match(r"\s*\|", lines[i]):
-                table_lines.append(lines[i])
-                i += 1
-
-            # Extract cell contents (skip separator rows like |---|---|)
-            cells_text = []
-            for tl in table_lines:
-                if re.match(r"\s*\|[\s\-:|]+\|\s*$", tl):
-                    continue
-                cells = [c.strip() for c in tl.split("|") if c.strip()]
-                cells_text.extend(cells)
-
-            # Check if this table has paragraph-length text (>80 chars in a cell)
-            has_paragraph = any(len(cell) > 80 for cell in cells_text)
-            if has_paragraph:
-                for cell in cells_text:
-                    if len(cell) > 40:
-                        filtered.append(cell)
-            continue
-
-        # Detect clusters of financial data lines (charts/tables in plain text)
-        if _is_financial_line(line):
-            # Skip consecutive financial lines
-            while i < len(lines) and (
-                _is_financial_line(lines[i]) or not lines[i].strip()
-            ):
-                i += 1
-            continue
-
-        filtered.append(line)
-        i += 1
-
-    return "\n".join(filtered).strip()
+    return "\n\n".join(parts)
 
 
 def html_to_text(html_path: Path) -> str:
